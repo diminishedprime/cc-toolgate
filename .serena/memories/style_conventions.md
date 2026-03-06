@@ -12,3 +12,5 @@
 - Release profile: strip=true, lto=true
 - Types in dedicated files (types.rs), parsing logic separate from evaluation
 - Config uses embedded defaults + user overlay merge pattern
+- Always bump version in Cargo.toml when making changes (semver: breaking → minor, fixes → patch)
+- Install from source tree after changes: `cargo install --path .`
