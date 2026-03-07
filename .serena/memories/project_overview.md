@@ -3,7 +3,7 @@
 **Purpose:** PreToolUse hook for Claude Code that gates Bash commands with compound-command-aware validation.
 **Language:** Rust (edition 2024)
 **Repo:** butterflyskies/cc-toolgate
-**Version:** 0.5.0
+**Version:** 0.6.0
 **Binary:** `~/.cargo/bin/cc-toolgate` (installed via `cargo install --path .`)
 
 ## Architecture
@@ -50,6 +50,6 @@ config.default.toml Embedded default config
 serde, serde_json, toml, shlex, log, simplelog, tree-sitter, tree-sitter-bash, shellexpand
 
 ## Tests
-367+ total: unit (colocated) + integration (tests/integration.rs)
+418+ total: unit (colocated) + integration (tests/integration.rs)
 - All modules have thorough rustdoc — zero `cargo doc --document-private-items` warnings
 - Tests that mutate process env use `require_nextest()` guard — must run via `cargo nextest run`
