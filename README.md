@@ -60,7 +60,7 @@ src/
     gh.rs           Subcommand-aware gh CLI evaluation
   logging.rs        File appender for decision log
 tests/
-  integration.rs    219 integration tests (decision_test! macro)
+  integration.rs    integration tests (decision_test! macro)
 config.default.toml Embedded default config
 ```
 
@@ -132,13 +132,19 @@ echo hello | kubectl apply -f -   → max(allow, ask) = ASK
 
 ## Installation
 
-Build from source (requires Rust 2024 edition, i.e. rustc 1.85+):
+### From crates.io
 
 ```bash
-cargo build --release
+cargo install cc-toolgate
 ```
 
-The binary is at `target/release/cc-toolgate`.
+### From source
+
+Requires Rust 2024 edition (rustc 1.85+):
+
+```bash
+cargo install --path .
+```
 
 ### Hook configuration
 
@@ -233,23 +239,18 @@ Commands in the `[wrappers]` section execute their arguments as subcommands. Eac
 
 ### Running tests
 
-```bash
-cargo test              # Run all 337 tests (118 unit + 219 integration)
-cargo test --lib        # Unit tests only
-cargo test --test integration  # Integration tests only
-```
-
-[cargo-nextest](https://nexte.st/) is recommended for faster parallel execution and better output:
+Requires [cargo-nextest](https://nexte.st/) (process-per-test isolation needed for env-gate tests):
 
 ```bash
-cargo nextest run       # All tests
-cargo nextest run -E 'test(heredoc)'  # Filter by name pattern
+cargo nextest run                       # All tests
+cargo nextest run -E 'test(heredoc)'    # Filter by name pattern
+cargo nextest run --test integration    # Integration tests only
 ```
 
 ### Test structure
 
-- **Unit tests** (118): Colocated in `src/` modules with `#[cfg(test)]`. These test internal parsing and evaluation logic and need `super::*` access to private helpers.
-- **Integration tests** (219): In `tests/integration.rs`. These test end-to-end command evaluation through the public API.
+- **Unit tests**: Colocated in `src/` modules with `#[cfg(test)]`. These test internal parsing and evaluation logic and need `super::*` access to private helpers.
+- **Integration tests**: In `tests/integration.rs`. These test end-to-end command evaluation through the public API.
 
 ### Adding tests
 
