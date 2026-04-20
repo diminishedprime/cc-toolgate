@@ -12,14 +12,19 @@ use std::collections::HashMap;
 /// Subcommand-aware git evaluator.
 ///
 /// Evaluation order:
-/// 1. Force-push flags → always ASK
-/// 2. Read-only subcommands → ALLOW (with redirection escalation)
-/// 3. Env-gated subcommands → ALLOW if all `config_env` entries match, else ASK
-/// 4. `--version` → ALLOW
-/// 5. Everything else → ASK
+/// 1. Denied subcommands → DENY (with optional custom reason)
+/// 2. Force-push flags → always ASK
+/// 3. Read-only subcommands → ALLOW (with redirection escalation)
+/// 4. Env-gated subcommands → ALLOW if all `config_env` entries match, else ASK
+/// 5. `--version` → ALLOW
+/// 6. Everything else → ASK
 pub struct GitSpec {
     /// Git subcommands that are always allowed (e.g. `status`, `log`, `diff`).
     read_only: Vec<String>,
+    /// Git subcommands that are always denied (e.g. `add`).
+    deny: Vec<String>,
+    /// Optional per-subcommand custom reason for DENY.
+    deny_reasons: HashMap<String, String>,
     /// Subcommands allowed only when all `config_env` entries match.
     allowed_with_config: Vec<String>,
     /// Required env var name→value pairs that gate `allowed_with_config` subcommands.
@@ -33,6 +38,8 @@ impl GitSpec {
     pub fn from_config(config: &GitConfig) -> Self {
         Self {
             read_only: config.read_only.clone(),
+            deny: config.deny.clone(),
+            deny_reasons: config.deny_reasons.clone(),
             allowed_with_config: config.allowed_with_config.clone(),
             config_env: config.config_env.clone(),
             force_push_flags: config.force_push_flags.clone(),
@@ -93,6 +100,19 @@ impl CommandSpec for GitSpec {
     fn evaluate(&self, ctx: &CommandContext) -> RuleMatch {
         let sub = Self::subcommand(ctx);
         let sub_str = sub.as_deref().unwrap_or("?");
+
+        // Explicit deny list short-circuits everything else
+        if self.deny.iter().any(|s| s == sub_str) {
+            let reason = self
+                .deny_reasons
+                .get(sub_str)
+                .cloned()
+                .unwrap_or_else(|| format!("git {sub_str} is denied"));
+            return RuleMatch {
+                decision: Decision::Deny,
+                reason,
+            };
+        }
 
         // Force-push → ask regardless of config
         if sub_str == "push" {
@@ -189,6 +209,8 @@ mod tests {
                 "diff".into(),
                 "branch".into(),
             ],
+            deny: vec![],
+            deny_reasons: HashMap::new(),
             allowed_with_config: vec!["push".into(), "pull".into(), "add".into()],
             config_env: HashMap::from([("GIT_CONFIG_GLOBAL".into(), "~/.gitconfig.ai".into())]),
             force_push_flags: vec!["--force".into(), "-f".into(), "--force-with-lease".into()],
@@ -314,5 +336,61 @@ mod tests {
     fn allow_git_c_config_status() {
         // -c key=value is also a global flag
         assert_eq!(eval("git -c core.pager=cat status"), Decision::Allow);
+    }
+
+    // ── Deny list ──
+
+    fn spec_with_deny() -> GitSpec {
+        GitSpec::from_config(&GitConfig {
+            read_only: vec!["status".into(), "log".into()],
+            deny: vec!["add".into()],
+            deny_reasons: HashMap::from([(
+                "add".into(),
+                "Staging is the user's responsibility.".into(),
+            )]),
+            allowed_with_config: vec![],
+            config_env: HashMap::new(),
+            force_push_flags: vec!["--force".into()],
+        })
+    }
+
+    #[test]
+    fn deny_git_add() {
+        let s = spec_with_deny();
+        let ctx = CommandContext::from_command("git add .");
+        let result = s.evaluate(&ctx);
+        assert_eq!(result.decision, Decision::Deny);
+        assert_eq!(result.reason, "Staging is the user's responsibility.");
+    }
+
+    #[test]
+    fn deny_without_custom_reason_has_default() {
+        let s = GitSpec::from_config(&GitConfig {
+            read_only: vec![],
+            deny: vec!["add".into()],
+            deny_reasons: HashMap::new(),
+            allowed_with_config: vec![],
+            config_env: HashMap::new(),
+            force_push_flags: vec![],
+        });
+        let ctx = CommandContext::from_command("git add foo.txt");
+        let result = s.evaluate(&ctx);
+        assert_eq!(result.decision, Decision::Deny);
+        assert_eq!(result.reason, "git add is denied");
+    }
+
+    #[test]
+    fn deny_short_circuits_read_only() {
+        // If a subcommand is in both read_only and deny, deny wins.
+        let s = GitSpec::from_config(&GitConfig {
+            read_only: vec!["status".into()],
+            deny: vec!["status".into()],
+            deny_reasons: HashMap::new(),
+            allowed_with_config: vec![],
+            config_env: HashMap::new(),
+            force_push_flags: vec![],
+        });
+        let ctx = CommandContext::from_command("git status");
+        assert_eq!(s.evaluate(&ctx).decision, Decision::Deny);
     }
 }

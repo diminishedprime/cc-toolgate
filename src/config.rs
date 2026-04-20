@@ -1,10 +1,17 @@
 //! Configuration loading and overlay merge logic.
 //!
 //! cc-toolgate ships with sensible defaults embedded in the binary via
-//! `config.default.toml`. Users can override any part by placing a
-//! `config.toml` at `~/.config/cc-toolgate/config.toml`. The user config
-//! **merges** with defaults: lists extend (deduplicated), scalars override,
-//! `remove_<field>` subtracts, and `replace = true` replaces entirely.
+//! `config.default.toml`. Overlays merge on top in this order (later wins):
+//!
+//! 1. Embedded defaults.
+//! 2. User overlay at `~/.config/cc-toolgate/config.toml`.
+//! 3. Project overlay at `<git-root>/.claude/cc-toolgate.toml` (if CWD is
+//!    inside a git repo). Lets a project permit extra commands without
+//!    loosening user-global rules.
+//!
+//! All overlays use the same semantics: lists extend (deduplicated),
+//! scalars override, `remove_<field>` subtracts, and `replace = true`
+//! replaces entirely.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -89,6 +96,14 @@ pub struct GitConfig {
     /// Subcommands that are always allowed (e.g. `status`, `log`, `diff`, `branch`).
     #[serde(default)]
     pub read_only: Vec<String>,
+    /// Subcommands that are always denied (e.g. `add`). Denied subcommands
+    /// short-circuit evaluation before any other rule.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    /// Optional custom reason strings for denied subcommands. Keys are
+    /// subcommand names; the value is surfaced as `permissionDecisionReason`.
+    #[serde(default)]
+    pub deny_reasons: HashMap<String, String>,
     /// Subcommands that are allowed only when all `config_env` entries match
     /// (e.g. `push`, `pull` when `GIT_CONFIG_GLOBAL=~/.gitconfig.ai`).
     #[serde(default)]
@@ -224,12 +239,17 @@ struct GitOverlay {
     #[serde(default)]
     read_only: Vec<String>,
     #[serde(default)]
+    deny: Vec<String>,
+    deny_reasons: Option<HashMap<String, String>>,
+    #[serde(default)]
     allowed_with_config: Vec<String>,
     config_env: Option<HashMap<String, String>>,
     #[serde(default)]
     force_push_flags: Vec<String>,
     #[serde(default)]
     remove_read_only: Vec<String>,
+    #[serde(default)]
+    remove_deny: Vec<String>,
     #[serde(default)]
     remove_allowed_with_config: Vec<String>,
     #[serde(default)]
@@ -316,13 +336,18 @@ impl Config {
     /// Load configuration with resolution order:
     /// 1. Start with embedded defaults
     /// 2. Merge user overlay from ~/.config/cc-toolgate/config.toml (if exists)
+    /// 3. Merge project overlay from <git-root>/.claude/cc-toolgate.toml
+    ///    (if CWD is inside a git repo and the file exists)
     ///
-    /// User config merges with defaults: lists extend, scalars override.
+    /// Each overlay merges with what's below it: lists extend, scalars override.
     /// Set `replace = true` in any section to replace its defaults entirely.
-    /// Use `remove_<field>` lists to subtract specific items from defaults.
+    /// Use `remove_<field>` lists to subtract specific items.
     pub fn load() -> Self {
         let mut config = Self::default_config();
         if let Some(overlay) = Self::load_overlay() {
+            config.apply_overlay(overlay);
+        }
+        if let Some(overlay) = Self::load_project_overlay() {
             config.apply_overlay(overlay);
         }
         config
@@ -332,14 +357,15 @@ impl Config {
     fn load_overlay() -> Option<ConfigOverlay> {
         let home = std::env::var_os("HOME")?;
         let path = std::path::Path::new(&home).join(".config/cc-toolgate/config.toml");
-        let content = std::fs::read_to_string(path).ok()?;
-        match toml::from_str(&content) {
-            Ok(overlay) => Some(overlay),
-            Err(e) => {
-                eprintln!("cc-toolgate: config parse error: {e}");
-                None
-            }
-        }
+        load_overlay_from_path(&path, "config parse error")
+    }
+
+    /// Try to load project overlay from <git-root>/.claude/cc-toolgate.toml.
+    fn load_project_overlay() -> Option<ConfigOverlay> {
+        let cwd = std::env::current_dir().ok()?;
+        let git_root = find_git_root(&cwd)?;
+        let path = git_root.join(".claude/cc-toolgate.toml");
+        load_overlay_from_path(&path, "project config parse error")
     }
 
     /// Apply an overlay on top of this config (merge semantics).
@@ -384,6 +410,12 @@ impl Config {
             g.replace,
         );
         merge_list(
+            &mut self.git.deny,
+            g.deny,
+            &g.remove_deny,
+            g.replace,
+        );
+        merge_list(
             &mut self.git.allowed_with_config,
             g.allowed_with_config,
             &g.remove_allowed_with_config,
@@ -397,6 +429,9 @@ impl Config {
         );
         if let Some(v) = g.config_env {
             self.git.config_env = v;
+        }
+        if let Some(v) = g.deny_reasons {
+            self.git.deny_reasons = v;
         }
 
         // Cargo
@@ -472,6 +507,33 @@ impl Config {
         let overlay: ConfigOverlay = toml::from_str(toml_str).unwrap();
         self.apply_overlay(overlay);
     }
+}
+
+/// Read and parse a ConfigOverlay from `path`. Returns `None` if the file
+/// doesn't exist; logs to stderr and returns `None` on parse errors.
+fn load_overlay_from_path(path: &std::path::Path, err_label: &str) -> Option<ConfigOverlay> {
+    let content = std::fs::read_to_string(path).ok()?;
+    match toml::from_str(&content) {
+        Ok(overlay) => Some(overlay),
+        Err(e) => {
+            eprintln!("cc-toolgate: {err_label}: {e}");
+            None
+        }
+    }
+}
+
+/// Walk up from `start` looking for a `.git` entry (dir for normal repos,
+/// file for worktrees). Returns the containing directory, or `None` if no
+/// ancestor contains `.git`.
+fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -719,5 +781,74 @@ mod tests {
         config.apply_overlay_str("");
         assert_eq!(config.commands.allow.len(), original.commands.allow.len());
         assert_eq!(config.git.read_only.len(), original.git.read_only.len());
+    }
+
+    // ── Project overlay discovery ──
+
+    /// Make a scratch dir under std::env::temp_dir() unique to this test run.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cc-toolgate-test-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn find_git_root_finds_dot_git_in_ancestor() {
+        let root = scratch_dir("find-root");
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let deep = root.join("a/b/c");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        assert_eq!(find_git_root(&deep), Some(root.clone()));
+        assert_eq!(find_git_root(&root), Some(root.clone()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn find_git_root_returns_none_outside_repo() {
+        let root = scratch_dir("no-git");
+        // No .git anywhere inside `root`. We can't guarantee that no ancestor
+        // of /tmp has .git, but in practice std::env::temp_dir() is clean on
+        // macOS/Linux CI. If this ever flakes we can inject a sentinel.
+        let found = find_git_root(&root);
+        assert!(
+            found.as_deref() != Some(root.as_path()),
+            "root itself shouldn't match when it has no .git"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn project_overlay_file_parses_and_extends_allow() {
+        let root = scratch_dir("project-overlay");
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir(root.join(".claude")).unwrap();
+        std::fs::write(
+            root.join(".claude/cc-toolgate.toml"),
+            r#"
+            [commands]
+            allow = ["my-project-tool"]
+            "#,
+        )
+        .unwrap();
+
+        let path = root.join(".claude/cc-toolgate.toml");
+        let overlay = load_overlay_from_path(&path, "test").expect("parses");
+
+        let mut config = Config::default_config();
+        config.apply_overlay(overlay);
+        assert!(
+            config
+                .commands
+                .allow
+                .contains(&"my-project-tool".to_string())
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
