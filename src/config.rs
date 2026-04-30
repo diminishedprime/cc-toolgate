@@ -488,7 +488,8 @@ impl Config {
 }
 
 /// Read and parse a ConfigOverlay from `path`. Returns `None` if the file
-/// doesn't exist; logs to stderr and returns `None` on parse errors.
+/// can't be read (missing, permission denied, etc.); logs to stderr and
+/// returns `None` on parse errors.
 fn load_overlay_from_path(path: &std::path::Path, err_label: &str) -> Option<ConfigOverlay> {
     let content = std::fs::read_to_string(path).ok()?;
     match toml::from_str(&content) {
