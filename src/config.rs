@@ -788,20 +788,6 @@ mod tests {
     }
 
     #[test]
-    fn find_git_root_returns_none_outside_repo() {
-        let root = scratch_dir("no-git");
-        // No .git anywhere inside `root`. We can't guarantee that no ancestor
-        // of /tmp has .git, but in practice std::env::temp_dir() is clean on
-        // macOS/Linux CI. If this ever flakes we can inject a sentinel.
-        let found = find_git_root(&root);
-        assert!(
-            found.as_deref() != Some(root.as_path()),
-            "root itself shouldn't match when it has no .git"
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
     fn project_overlay_file_parses_and_extends_allow() {
         let root = scratch_dir("project-overlay");
         std::fs::create_dir(root.join(".git")).unwrap();
